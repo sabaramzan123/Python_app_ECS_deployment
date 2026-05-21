@@ -18,13 +18,15 @@ resource "aws_iam_role" "ecs_execution" {
   tags = local.common_tags
 }
 
+# FIX: arn:aws:partition:aws:: galat tha — arn:aws:iam::aws: sahi hai
 resource "aws_iam_role_policy_attachment" "ecs_execution" {
   role       = aws_iam_role.ecs_execution.name
-  policy_arn = "arn:aws:partition:aws::policy/service-role/AmazonECSTaskExecutionRolePolicy"
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 # -----------------------------------------------
-# ECS TASK ROLE (app ko AWS services access dene ke liye)
+# ECS TASK ROLE
+# FIX: Duplicate block hata diya
 # -----------------------------------------------
 resource "aws_iam_role" "ecs_task" {
   name = "${var.project_name}-ecs-task-role"

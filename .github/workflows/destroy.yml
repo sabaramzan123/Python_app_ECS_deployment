@@ -74,6 +74,15 @@ jobs:
         run: terraform init -input=false -backend-config=backend.hcl
         working-directory: infra/terraform
 
+      - name: Remove ECR repository          # ← pehle ECR images delete karo
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_NAME="${PROJECT_NAME}-compiler-app"
+          if aws ecr describe-repositories --region "${AWS_REGION}" --repository-names "${REPO_NAME}" >/dev/null 2>&1; then
+            aws ecr delete-repository --region "${AWS_REGION}" --repository-name "${REPO_NAME}" --force
+          fi
+
       - name: Destroy the Stack
         run: |
           terraform destroy -auto-approve \

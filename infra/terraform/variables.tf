@@ -31,15 +31,6 @@ variable "private_subnet_cidrs" {
   default = ["10.0.3.0/24", "10.0.4.0/24"]
 }
 
-locals {
-  common_tags = {
-    Project     = var.project_name
-    Environment = "production"
-    ManagedBy   = "terraform"
-  }
-
-  azs = ["${var.aws_region}a", "${var.aws_region}b"]
-}
 
 variable "availability_zones" {
   type    = list(string)

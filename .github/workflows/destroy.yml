@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4  # FIX: v6 → v4
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v4
@@ -55,7 +55,7 @@ jobs:
           echo "✅ Confirmation successful."
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@v4  # FIX: v6 → v4
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
@@ -78,7 +78,8 @@ jobs:
         run: |
           terraform destroy -auto-approve \
             -var "aws_region=${AWS_REGION}" \
-            -var "project_name=${PROJECT_NAME}"
+            -var "project_name=${PROJECT_NAME}" \
+            -var "image_tag=dummy"  # FIX: required variable, destroy mein value matter nahi karti
         working-directory: infra/terraform
 
       - name: Remove ECR repository
@@ -100,7 +101,6 @@ jobs:
         if: github.event.inputs.destroy_backend_bucket == 'true'
         shell: bash
         run: |
-          # Cleanup logic same as before (versioning/markers)
           aws s3api list-object-versions --bucket "${TF_STATE_BUCKET}" --query 'Versions[].{Key:Key,VersionId:VersionId}' --output json | jq -r '.[] | "\(.Key) \(.VersionId)"' | while read -r key version; do aws s3api delete-object --bucket "${TF_STATE_BUCKET}" --key "$key" --version-id "$version"; done
           aws s3api list-object-versions --bucket "${TF_STATE_BUCKET}" --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' --output json | jq -r '.[] | "\(.Key) \(.VersionId)"' | while read -r key version; do aws s3api delete-object --bucket "${TF_STATE_BUCKET}" --key "$key" --version-id "$version"; done
           aws s3api delete-bucket --bucket "${TF_STATE_BUCKET}"

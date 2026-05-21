@@ -1,0 +1,113 @@
+name: Deploy To ECS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Optional image tag override. Leave blank to use the commit SHA.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  PROJECT_NAME: ${{ vars.PROJECT_NAME || 'compiler-fixer' }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_STATE_KEY: ${{ vars.TF_STATE_KEY || 'production/terraform.tfstate' }}
+  AWS_ROLE_TO_ASSUME: ${{ vars.AWS_ROLE_TO_ASSUME }}
+  TF_IN_AUTOMATION: true
+
+concurrency:
+  group: compiler-fixer-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Apply Terraform, Push Image, Update ECS
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.14.8
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+
+      - name: Decide image tag
+        id: meta
+        shell: bash
+        run: |
+          image_tag="${{ github.event.inputs.image_tag }}"
+          if [[ -z "${image_tag}" ]]; then
+            image_tag="${GITHUB_SHA::12}"
+          fi
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Render backend config for Terraform
+        shell: bash
+        run: |
+          cat > infra/terraform/backend.hcl <<EOF
+          bucket       = "${TF_STATE_BUCKET}"
+          key          = "${TF_STATE_KEY}"
+          region       = "${AWS_REGION}"
+          use_lockfile = true
+          EOF
+
+      - name: Initialize Terraform
+        run: terraform init -input=false -backend-config=backend.hcl
+        working-directory: infra/terraform
+
+      - name: Get AWS account id
+        id: aws
+        shell: bash
+        run: echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push container image
+        shell: bash
+        env:
+          ACCOUNT_ID: ${{ steps.aws.outputs.account_id }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          registry="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          image_uri="${registry}/${PROJECT_NAME}-compiler-app:${IMAGE_TAG}"
+
+          echo "Building ${image_uri}"
+          # Path '.' assume karta hai ki Dockerfile root directory mein hai
+          docker build --tag "${image_uri}" .
+          docker push "${image_uri}"
+
+      - name: Apply Terraform with new image
+        run: |
+          terraform apply -auto-approve \
+            -var "aws_region=${AWS_REGION}" \
+            -var "project_name=${PROJECT_NAME}" \
+            -var "image_tag=${{ steps.meta.outputs.image_tag }}"
+        working-directory: infra/terraform
+
+      - name: Summarize deployment
+        shell: bash
+        run: |
+          {
+            echo "## Deployment complete"
+            echo "- App: Streamlit Compiler Fixer"
+            echo "- Image tag: ${{ steps.meta.outputs.image_tag }}"
+          } >> "$GITHUB_STEP_SUMMARY"

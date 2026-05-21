@@ -1,0 +1,115 @@
+name: Destroy AWS Compiler App Stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_project_name:
+        description: Type the exact project name to confirm destroy.
+        required: true
+        type: string
+      destroy_backend_bucket:
+        description: Also delete the Terraform state bucket after destroy.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  PROJECT_NAME: ${{ vars.PROJECT_NAME || 'compiler-fixer' }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_STATE_KEY: ${{ vars.TF_STATE_KEY || 'production/terraform.tfstate' }}
+  AWS_ROLE_TO_ASSUME: ${{ vars.AWS_ROLE_TO_ASSUME }}
+  TF_IN_AUTOMATION: true
+
+concurrency:
+  group: compiler-fixer-destroy
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    name: Destroy Terraform-managed AWS resources
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.14.8
+
+      - name: Confirm manual destroy request
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event.inputs.confirm_project_name }}" != "${PROJECT_NAME}" ]]; then
+            echo "❌ Confirmation failed. Expected: ${PROJECT_NAME}"
+            exit 1
+          fi
+          echo "✅ Confirmation successful."
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+
+      - name: Render backend config
+        shell: bash
+        run: |
+          cat > infra/terraform/backend.hcl <<EOF
+          bucket       = "${TF_STATE_BUCKET}"
+          key          = "${TF_STATE_KEY}"
+          region       = "${AWS_REGION}"
+          use_lockfile = true
+          EOF
+
+      - name: Initialize Terraform
+        run: terraform init -input=false -backend-config=backend.hcl
+        working-directory: infra/terraform
+
+      - name: Destroy the Stack
+        run: |
+          terraform destroy -auto-approve \
+            -var "aws_region=${AWS_REGION}" \
+            -var "project_name=${PROJECT_NAME}"
+        working-directory: infra/terraform
+
+      - name: Remove ECR repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_NAME="${PROJECT_NAME}-compiler-app"
+          if aws ecr describe-repositories --region "${AWS_REGION}" --repository-names "${REPO_NAME}" >/dev/null 2>&1; then
+            aws ecr delete-repository --region "${AWS_REGION}" --repository-name "${REPO_NAME}" --force
+          fi
+
+      - name: Remove Terraform state objects from S3
+        shell: bash
+        run: |
+          aws s3 rm "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}" || true
+          aws s3 rm "s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}.tflock" || true
+
+      - name: Optionally delete the Terraform backend bucket
+        if: github.event.inputs.destroy_backend_bucket == 'true'
+        shell: bash
+        run: |
+          # Cleanup logic same as before (versioning/markers)
+          aws s3api list-object-versions --bucket "${TF_STATE_BUCKET}" --query 'Versions[].{Key:Key,VersionId:VersionId}' --output json | jq -r '.[] | "\(.Key) \(.VersionId)"' | while read -r key version; do aws s3api delete-object --bucket "${TF_STATE_BUCKET}" --key "$key" --version-id "$version"; done
+          aws s3api list-object-versions --bucket "${TF_STATE_BUCKET}" --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' --output json | jq -r '.[] | "\(.Key) \(.VersionId)"' | while read -r key version; do aws s3api delete-object --bucket "${TF_STATE_BUCKET}" --key "$key" --version-id "$version"; done
+          aws s3api delete-bucket --bucket "${TF_STATE_BUCKET}"
+
+      - name: Summarize destroy result
+        shell: bash
+        run: |
+          {
+            echo "## ✅ Destroy Complete"
+            echo "- Project: ${PROJECT_NAME}"
+            echo "- ECR Repo cleaned: ${PROJECT_NAME}-compiler-app"
+          } >> "$GITHUB_STEP_SUMMARY"

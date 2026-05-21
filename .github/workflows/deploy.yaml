@@ -35,15 +35,15 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4        # v6 exist nahi karta, v4 use karo
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.14.8
+          terraform_version: "1.9.8"    # 1.14.8 exist nahi karta
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
@@ -61,6 +61,7 @@ jobs:
       - name: Render backend config for Terraform
         shell: bash
         run: |
+          mkdir -p infra/terraform
           cat > infra/terraform/backend.hcl <<EOF
           bucket       = "${TF_STATE_BUCKET}"
           key          = "${TF_STATE_KEY}"
@@ -69,16 +70,25 @@ jobs:
           EOF
 
       - name: Initialize Terraform
-        run: terraform init -input=false -backend-config=backend.hcl
         working-directory: infra/terraform
+        run: terraform init -input=false -backend-config=backend.hcl
 
-      - name: Get AWS account id
+      - name: Get AWS account ID
         id: aws
         shell: bash
-        run: echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Apply Terraform first (ECR repo banana zaroori hai push se pehle)
+        working-directory: infra/terraform
+        run: |
+          terraform apply -auto-approve \
+            -var "aws_region=${AWS_REGION}" \
+            -var "project_name=${PROJECT_NAME}" \
+            -var "image_tag=${{ steps.meta.outputs.image_tag }}"
 
       - name: Build and push container image
         shell: bash
@@ -91,17 +101,19 @@ jobs:
           image_uri="${registry}/${PROJECT_NAME}-compiler-app:${IMAGE_TAG}"
 
           echo "Building ${image_uri}"
-          # Path '.' assume karta hai ki Dockerfile root directory mein hai
           docker build --tag "${image_uri}" .
           docker push "${image_uri}"
 
-      - name: Apply Terraform with new image
+      - name: Force ECS redeployment
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
         run: |
-          terraform apply -auto-approve \
-            -var "aws_region=${AWS_REGION}" \
-            -var "project_name=${PROJECT_NAME}" \
-            -var "image_tag=${{ steps.meta.outputs.image_tag }}"
-        working-directory: infra/terraform
+          aws ecs update-service \
+            --cluster "${PROJECT_NAME}-cluster" \
+            --service "${PROJECT_NAME}-service" \
+            --force-new-deployment \
+            --region "${AWS_REGION}"
 
       - name: Summarize deployment
         shell: bash
